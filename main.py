@@ -6,11 +6,14 @@ mcp = FastMCP("GKE-Cluster-Inspector")
 
 
 def _init_k8s():
-    """Load local kubeconfig (configured for GKE via gcloud)."""
+
     try:
-        config.load_kube_config()
-    except Exception as e:
-        raise RuntimeError(f"Failed to load kubeconfig: {str(e)}")
+        config.load_incluster_config()
+    except config.ConfigException:
+        try:
+            config.load_kube_config()
+        except Exception as e:
+            raise RuntimeError(f"Failed to load any Kubernetes configuration: {str(e)}")
 
 
 @mcp.tool()
