@@ -44,7 +44,7 @@ spec:
       serviceAccountName: mcp-server-sa
       containers:
         - name: mcp-server
-          image: gcr.io/open-source-apps-001/python-fastmcp:83d9bb6d35be62ff43aa4cea5e3b82a24beb5206
+          image: gcr.io/open-source-apps-001/python-fastmcp:a28841a38063893a5da9cf3bc4e0ef6a07d59a22
           ports:
             - containerPort: 8080
 ---
