@@ -1,9 +1,28 @@
 import functools
+import os
 from typing import Any, Dict, Optional
 from fastmcp import FastMCP
-from kubernetes import client, config
+from kubernetes import client, config, stream
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 
 mcp = FastMCP("GKE-Cluster-Inspector")
+
+API_KEY = os.getenv("API_KEY")
+
+
+# Define ASGI Auth Middleware
+class AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        # Exclude health check endpoints if necessary
+        if request.url.path == "/health":
+            return await call_next(request)
+
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or auth_header != f"Bearer {API_KEY}":
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+        return await call_next(request)
 
 
 @functools.lru_cache(maxsize=1)
@@ -291,6 +310,121 @@ def optimize_deployment_resources(
         }
     except Exception as e:
         return {"error": f"Failed to apply patch: {str(e)}"}
+
+
+@mcp.tool()
+def check_cross_namespace_connectivity(
+    src_pod_name: str,
+    src_namespace: str,
+    target_pod_name: str,
+    target_namespace: str,
+    port: int,
+    protocol: str = "tcp",
+    container_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Validates network connectivity between two Pods across different namespaces
+    by executing a socket probe inside the source Pod.
+    """
+    _init_k8s()
+    v1 = client.CoreV1Api()
+
+    try:
+        # 1. Fetch Target Pod info to get IP and FQDN
+        target_pod = v1.read_namespaced_pod(
+            name=target_pod_name, namespace=target_namespace
+        )
+        target_ip = target_pod.status.pod_ip
+        target_fqdn = f"{target_pod_name}.{target_namespace}.pod.cluster.local"
+
+        if not target_ip:
+            return {
+                "status": "FAILED",
+                "reason": f"Target pod '{target_pod_name}' in namespace '{target_namespace}' does not have an IP assigned.",
+            }
+
+        # 2. Build shell fallback probe commands for the target IP and Port
+        # Tries nc, timeout + bash /dev/tcp, or python fallback
+        cmd_script = f"""
+        if command -v nc >/dev/null 2>&1; then
+            nc -z -w 3 {target_ip} {port}
+        elif command -v timeout >/dev/null 2>&1; then
+            timeout 3 bash -c '</dev/tcp/{target_ip}/{port}'
+        else
+            python3 -c "import socket; s = socket.socket(); s.settimeout(3); exit(s.connect_ex(('{target_ip}', {port})))"
+        fi
+        """
+        exec_command = ["/bin/sh", "-c", cmd_script]
+
+        # 3. Stream execution on source pod
+        exec_kwargs = {
+            "name": src_pod_name,
+            "namespace": src_namespace,
+            "command": exec_command,
+            "stderr": True,
+            "stdout": True,
+            "tty": False,
+            "_preload_content": False,
+        }
+        if container_name:
+            exec_kwargs["container"] = container_name
+
+        resp = stream(v1.connect_get_namespaced_pod_exec, **exec_kwargs)
+        resp.run_forever(timeout=10)
+
+        stdout = resp.read_stdout()
+        stderr = resp.read_stderr()
+        return_code = resp.returncode
+
+        is_connected = return_code == 0
+
+        return {
+            "connected": is_connected,
+            "source": {"pod": src_pod_name, "namespace": src_namespace},
+            "target": {
+                "pod": target_pod_name,
+                "namespace": target_namespace,
+                "ip": target_ip,
+                "fqdn": target_fqdn,
+                "port": port,
+            },
+            "raw_output": stdout.strip(),
+            "error_output": stderr.strip(),
+        }
+
+    except Exception as e:
+        return {"error": f"Failed to perform connectivity test: {str(e)}"}
+
+
+@mcp.tool()
+def inspect_network_policies(
+    source_namespace: str,
+    target_namespace: str,
+) -> Dict[str, Any]:
+    """
+    Lists active NetworkPolicies in source and target namespaces to identify isolation rules.
+    """
+    _init_k8s()
+    net_v1 = client.NetworkingV1Api()
+
+    try:
+        src_policies = net_v1.list_namespaced_network_policy(namespace=source_namespace)
+        tgt_policies = net_v1.list_namespaced_network_policy(namespace=target_namespace)
+
+        return {
+            "source_namespace": {
+                "namespace": source_namespace,
+                "total_policies": len(src_policies.items),
+                "policies": [p.metadata.name for p in src_policies.items],
+            },
+            "target_namespace": {
+                "namespace": target_namespace,
+                "total_policies": len(tgt_policies.items),
+                "policies": [p.metadata.name for p in tgt_policies.items],
+            },
+        }
+    except Exception as e:
+        return {"error": f"Failed to list network policies: {str(e)}"}
 
 
 app = mcp.http_app()
