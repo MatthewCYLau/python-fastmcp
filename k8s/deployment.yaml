@@ -44,9 +44,15 @@ spec:
       serviceAccountName: mcp-server-sa
       containers:
         - name: mcp-server
-          image: gcr.io/open-source-apps-001/python-fastmcp:a28841a38063893a5da9cf3bc4e0ef6a07d59a22
+          image: gcr.io/open-source-apps-001/python-fastmcp:625959c0e3aa7f65bd2c78a9a53607c06197a842
           ports:
             - containerPort: 8080
+          env:
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-api-secret
+                  key: api-key
 ---
 apiVersion: v1
 kind: Service

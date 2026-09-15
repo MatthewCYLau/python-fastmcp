@@ -2,7 +2,8 @@ import functools
 import os
 from typing import Any, Dict, Optional
 from fastmcp import FastMCP
-from kubernetes import client, config, stream
+from kubernetes import client, config
+from kubernetes.stream import stream
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
